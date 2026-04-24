@@ -9,6 +9,7 @@ Usage:
     python3 convert_legacy_word.py /path/to/folder
     python3 convert_legacy_word.py /path/to/folder --output /path/to/output
     python3 convert_legacy_word.py /path/to/folder --no-extension-only
+    python3 convert_legacy_word.py /path/to/folder --extract-text
 """
 
 import argparse
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import shutil
 from pathlib import Path
+
+import docx
 
 
 # LibreOffice binary locations to try, in order
@@ -26,7 +29,7 @@ SOFFICE_CANDIDATES = [
 ]
 
 
-def find_soffice() -> str | None:
+def find_soffice():
     """Return the path to soffice, or None if not found."""
     for candidate in SOFFICE_CANDIDATES:
         if shutil.which(candidate) or Path(candidate).exists():
@@ -69,7 +72,7 @@ def collect_files(input_dir: Path, no_extension_only: bool) -> list[Path]:
         if is_legacy_word_file(f):
             candidates.append(f)
         else:
-            print(f"  [skip] {f.name} — not an OLE2 Word file")
+            print(f"  [skip] {f.name} -- not an OLE2 Word file")
     return candidates
 
 
@@ -97,6 +100,25 @@ def convert_file(soffice: str, src: Path, output_dir: Path) -> bool:
     return True
 
 
+def extract_text(docx_path: Path) -> bool:
+    """
+    Extract plain text from a .docx file and write a .txt sidecar
+    alongside it in the same directory.
+    Paragraphs are joined with newlines; blank paragraphs are preserved
+    as spacers so the document structure remains readable.
+    Returns True on success.
+    """
+    txt_path = docx_path.with_suffix(".txt")
+    try:
+        doc = docx.Document(docx_path)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        txt_path.write_text(text, encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"  [error] text extraction failed for {docx_path.name}: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Batch-convert legacy Word 6/95 files to .docx via LibreOffice."
@@ -116,6 +138,11 @@ def main():
         "--no-extension-only",
         action="store_true",
         help="Only process files with no extension (skip .doc files).",
+    )
+    parser.add_argument(
+        "--extract-text",
+        action="store_true",
+        help="After converting each file, extract plain text to a .txt sidecar in the output folder.",
     )
     args = parser.parse_args()
 
@@ -150,18 +177,48 @@ def main():
     # Convert
     success_count = 0
     fail_count = 0
+    txt_count = 0
+    txt_fail_count = 0
     for f in files:
         print(f"  Converting: {f.name} ...", end=" ", flush=True)
         ok = convert_file(soffice, f, output_dir)
         if ok:
             out_name = output_dir / (f.stem + ".docx")
-            print(f"OK → {out_name.name}")
+            print(f"OK -> {out_name.name}")
             success_count += 1
+            if args.extract_text:
+                print(f"  Extracting: {out_name.name} ...", end=" ", flush=True)
+                txt_ok = extract_text(out_name)
+                if txt_ok:
+                    print(f"OK -> {out_name.stem}.txt")
+                    txt_count += 1
+                else:
+                    txt_fail_count += 1
         else:
             fail_count += 1
 
+    # Second pass: extract text from any .docx in output_dir that has no sidecar yet.
+    # This catches files converted in a previous run without --extract-text.
+    if args.extract_text:
+        existing = [
+            f for f in sorted(output_dir.glob("*.docx"))
+            if not f.with_suffix(".txt").exists()
+        ]
+        if existing:
+            print(f"\nExtracting text from {len(existing)} pre-existing .docx file(s) with no sidecar:\n")
+            for f in existing:
+                print(f"  Extracting: {f.name} ...", end=" ", flush=True)
+                txt_ok = extract_text(f)
+                if txt_ok:
+                    print(f"OK -> {f.stem}.txt")
+                    txt_count += 1
+                else:
+                    txt_fail_count += 1
+
     # Summary
     print(f"\nDone. {success_count} converted, {fail_count} failed.")
+    if args.extract_text:
+        print(f"      {txt_count} text extracted, {txt_fail_count} failed.")
     if fail_count:
         print("Failed files may be corrupt or a non-Word OLE2 format.")
 
